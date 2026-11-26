@@ -23,7 +23,7 @@ spec:
       serviceAccountName: rag-sa
       containers:
         - name: rag-app
-          image: 677296948889.dkr.ecr.eu-north-1.amazonaws.com/rag-app:v1
+          image: 677296948889.dkr.ecr.eu-north-1.amazonaws.com/rag-app:702a2eb
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
