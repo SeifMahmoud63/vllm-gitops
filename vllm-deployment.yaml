@@ -5,7 +5,6 @@ metadata:
     app: vllm-openai
   name: vllm-cpu-deployment
 spec:
-  replicas: 3
   selector:
     matchLabels:
       app: vllm-openai
