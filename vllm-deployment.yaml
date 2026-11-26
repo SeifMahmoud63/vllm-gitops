@@ -18,10 +18,24 @@ spec:
       labels:
         app: vllm-openai
     spec:
+      serviceAccountName: vllm-sa
+      initContainers:
+      - name: sync-model-s3
+        image: amazon/aws-cli:latest
+        command:
+        - sh
+        - -c
+        - |
+          echo "Syncing model from S3..."
+          aws s3 sync s3://vllmm/models/Qwen2.5-0.5B-Instruct/ /models/Qwen2.5-0.5B-Instruct/
+          echo "Model synced successfully!"
+        volumeMounts:
+        - mountPath: /models
+          name: model-storage
       containers:
       - args:
         - --model
-        - Qwen/Qwen2.5-0.5B-Instruct
+        - /models/Qwen2.5-0.5B-Instruct
         - --port
         - '8000'
         - --host
@@ -36,8 +50,6 @@ spec:
         - -m
         - vllm.entrypoints.openai.api_server
         env:
-        - name: HF_HOME
-          value: /tmp/huggingface
         - name: VLLM_CPU_KVCACHE_SPACE
           value: '1'
         image: vllm/vllm-openai-cpu:latest-x86_64
@@ -55,6 +67,8 @@ spec:
         volumeMounts:
         - mountPath: /dev/shm
           name: dshm
+        - mountPath: /models
+          name: model-storage
         readinessProbe:
           httpGet:
             path: /health
@@ -74,3 +88,5 @@ spec:
           medium: Memory
           sizeLimit: 2Gi
         name: dshm
+      - emptyDir: {}
+        name: model-storage
