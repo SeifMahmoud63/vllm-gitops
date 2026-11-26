@@ -1,0 +1,16 @@
+# Local binaries & documentation (kept locally, not tracked in GitOps repo)
+helm.exe
+*.pdf
+
+# Python & environment secrets
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Temporary / test artifacts
+test_*.py
+temp_*.pdf
+section_*.pdf
+build_section_*.py

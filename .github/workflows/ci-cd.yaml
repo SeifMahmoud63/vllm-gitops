@@ -1,0 +1,53 @@
+name: Build & Deploy RAG App (CI/CD -> ECR -> GitOps ArgoCD)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/**'
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REPOSITORY: rag-app
+
+jobs:
+  build-and-update-gitops:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          SHORT_SHA=$(echo $IMAGE_TAG | cut -c1-7)
+          FULL_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${SHORT_SHA}"
+          docker build -t "$FULL_IMAGE" ./app
+          docker push "$FULL_IMAGE"
+          echo "FULL_IMAGE=$FULL_IMAGE" >> $GITHUB_ENV
+
+      - name: Update image tag in k8s/rag-deployment.yaml (Triggers ArgoCD)
+        run: |
+          sed -i "s|image: .*rag-app:.*|image: ${FULL_IMAGE}|g" k8s/rag-deployment.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/rag-deployment.yaml
+          git commit -m "chore(cd): bump rag-app image to ${FULL_IMAGE} [skip ci]"
+          git push origin main

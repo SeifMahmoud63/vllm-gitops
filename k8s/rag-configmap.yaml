@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-config
+  namespace: default
+data:
+  VLLM_BASE_URL: "http://vllm-service:8000/v1"
+  VLLM_MODEL: "/models/Qwen2.5-0.5B-Instruct"
+  QDRANT_HOST: "qdrant-service"
+  QDRANT_PORT: "6333"
+  QDRANT_COLLECTION: "rag_documents"
+  CHUNK_SIZE: "512"
+  CHUNK_OVERLAP: "115"
+  TOP_K: "4"
+  EMBEDDING_MODEL: "BAAI/bge-small-en-v1.5"

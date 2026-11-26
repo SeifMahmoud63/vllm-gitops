@@ -8,7 +8,7 @@ spec:
   source:
     repoURL: 'https://github.com/SeifMahmoud63/vllm-gitops.git'
     targetRevision: HEAD
-    path: .
+    path: k8s
   destination:
     server: 'https://kubernetes.default.svc'
     namespace: default

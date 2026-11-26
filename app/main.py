@@ -1,0 +1,329 @@
+import os
+import io
+import uuid
+import logging
+from datetime import datetime
+from typing import List, Optional
+
+import httpx
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from pypdf import PdfReader
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from fastembed import TextEmbedding
+
+load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("rag-app")
+
+# === Configuration from Environment (.env / AWS Secrets Manager) ===
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://vllm-service:8000/v1").rstrip("/")
+VLLM_MODEL = os.getenv("VLLM_MODEL", "/models/Qwen2.5-0.5B-Instruct")
+VLLM_API_KEY = os.getenv("VLLM_API_KEY", "")
+
+QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant-service")
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_documents")
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "512"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "115"))
+TOP_K = int(os.getenv("TOP_K", "4"))
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+
+app = FastAPI(title="Production EKS RAG Platform", version="1.0.0")
+
+# Lazy-initialized singletons
+embedder: Optional[TextEmbedding] = None
+qdrant: Optional[QdrantClient] = None
+
+
+def get_embedder() -> TextEmbedding:
+    global embedder
+    if embedder is None:
+        logger.info(f"Loading FastEmbed model: {EMBEDDING_MODEL_NAME}")
+        embedder = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
+    return embedder
+
+
+def get_qdrant() -> QdrantClient:
+    global qdrant
+    if qdrant is None:
+        qdrant = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        ensure_collection(qdrant)
+    return qdrant
+
+
+def ensure_collection(client: QdrantClient):
+    collections = [c.name for c in client.get_collections().collections]
+    if QDRANT_COLLECTION not in collections:
+        # Probe vector dimension dynamically
+        sample_vec = list(get_embedder().embed(["dimension probe"]))[0]
+        dim = len(sample_vec)
+        client.create_collection(
+            collection_name=QDRANT_COLLECTION,
+            vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+        )
+        logger.info(f"Created Qdrant collection '{QDRANT_COLLECTION}' with dim={dim}")
+
+
+def get_db_conn():
+    if not DATABASE_URL:
+        return None
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_db():
+    if not DATABASE_URL:
+        logger.warning("DATABASE_URL not set; skipping PostgreSQL table initialization.")
+        return
+    try:
+        conn = get_db_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS documents (
+                    id UUID PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    chunk_count INTEGER NOT NULL,
+                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS qa_history (
+                    id SERIAL PRIMARY KEY,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    sources_count INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+        conn.commit()
+        conn.close()
+        logger.info("PostgreSQL tables initialized successfully.")
+    except Exception as e:
+        logger.error(f"PostgreSQL init failed: {e}")
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+    try:
+        get_embedder()
+        get_qdrant()
+    except Exception as e:
+        logger.warning(f"Deferred Qdrant/Embedder init: {e}")
+
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    text = " ".join(text.split())
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    step = max(1, chunk_size - overlap)
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(text):
+            break
+        start += step
+    return chunks
+
+
+def extract_text(filename: str, content: bytes) -> str:
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        reader = PdfReader(io.BytesIO(content))
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+    if lower.endswith((".txt", ".md")):
+        return content.decode("utf-8", errors="ignore")
+    raise HTTPException(status_code=400, detail="Unsupported file type. Upload .pdf, .txt, or .md")
+
+
+class AskRequest(BaseModel):
+    question: str
+    top_k: Optional[int] = None
+
+
+class SourceChunk(BaseModel):
+    filename: str
+    score: float
+    text: str
+
+
+class AskResponse(BaseModel):
+    answer: str
+    sources: List[SourceChunk]
+    model: str
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "top_k": TOP_K,
+        "qdrant": f"{QDRANT_HOST}:{QDRANT_PORT}",
+        "db_configured": bool(DATABASE_URL),
+    }
+
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    content = await file.read()
+    text = extract_text(file.filename, content)
+    chunks = chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No readable text found in file.")
+
+    vectors = list(get_embedder().embed(chunks))
+    doc_id = str(uuid.uuid4())
+    points = [
+        PointStruct(
+            id=str(uuid.uuid4()),
+            vector=vec.tolist(),
+            payload={
+                "doc_id": doc_id,
+                "filename": file.filename,
+                "chunk_index": idx,
+                "text": chunk,
+            },
+        )
+        for idx, (chunk, vec) in enumerate(zip(chunks, vectors))
+    ]
+
+    client = get_qdrant()
+    client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+
+    # Save document metadata to AWS RDS PostgreSQL
+    if DATABASE_URL:
+        try:
+            conn = get_db_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO documents (id, filename, chunk_count) VALUES (%s, %s, %s)",
+                    (doc_id, file.filename, len(chunks)),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to log document in RDS: {e}")
+
+    return {
+        "doc_id": doc_id,
+        "filename": file.filename,
+        "chunks_created": len(chunks),
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+    }
+
+
+@app.post("/api/ask", response_model=AskResponse)
+async def ask_question(req: AskRequest):
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    k = req.top_k or TOP_K
+    q_vec = list(get_embedder().embed([question]))[0].tolist()
+
+    client = get_qdrant()
+    hits = client.search(
+        collection_name=QDRANT_COLLECTION,
+        query_vector=q_vec,
+        limit=k,
+    )
+
+    sources = [
+        SourceChunk(
+            filename=h.payload.get("filename", "unknown"),
+            score=round(float(h.score), 4),
+            text=h.payload.get("text", ""),
+        )
+        for h in hits
+    ]
+
+    context_block = "\n\n".join(
+        f"[Source {i+1}: {s.filename}]\n{s.text}" for i, s in enumerate(sources)
+    )
+
+    system_prompt = (
+        "You are a helpful AI assistant. Answer the user's question accurately using ONLY "
+        "the provided context below. If the answer is not in the context, say you do not have enough information."
+    )
+    user_prompt = f"Context:\n{context_block}\n\nQuestion: {question}"
+
+    headers = {"Content-Type": "application/json"}
+    if VLLM_API_KEY:
+        headers["Authorization"] = f"Bearer {VLLM_API_KEY}"
+
+    payload = {
+        "model": VLLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 512,
+    }
+
+    async with httpx.AsyncClient(timeout=90.0) as http_client:
+        resp = await http_client.post(f"{VLLM_BASE_URL}/chat/completions", json=payload, headers=headers)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"vLLM error ({resp.status_code}): {resp.text}")
+        data = resp.json()
+
+    answer = data["choices"][0]["message"]["content"]
+
+    # Log Q&A to AWS RDS PostgreSQL
+    if DATABASE_URL:
+        try:
+            conn = get_db_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO qa_history (question, answer, sources_count) VALUES (%s, %s, %s)",
+                    (question, answer, len(sources)),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to log Q&A in RDS: {e}")
+
+    return AskResponse(answer=answer, sources=sources, model=VLLM_MODEL)
+
+
+@app.get("/api/history")
+def get_history():
+    if not DATABASE_URL:
+        return {"documents": [], "history": []}
+    try:
+        conn = get_db_conn()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id, filename, chunk_count, uploaded_at FROM documents ORDER BY uploaded_at DESC LIMIT 20")
+            docs = cur.fetchall()
+            cur.execute("SELECT id, question, answer, sources_count, created_at FROM qa_history ORDER BY created_at DESC LIMIT 20")
+            hist = cur.fetchall()
+        conn.close()
+        return {"documents": docs, "history": hist}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RDS query failed: {e}")
+
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+def serve_frontend():
+    with open("static/index.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
