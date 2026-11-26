@@ -1,6 +1,7 @@
 name: Build & Deploy RAG App (CI/CD -> ECR -> GitOps ArgoCD)
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
