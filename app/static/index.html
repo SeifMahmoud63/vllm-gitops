@@ -18,15 +18,22 @@
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
     body { background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
     header {
-      padding: 18px 28px; border-bottom: 1px solid var(--border);
-      display: flex; justify-content: space-between; align-items: center; background: #0f172a;
+      padding: 16px 28px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; background: #0f172a; gap: 12px; flex-wrap: wrap;
     }
-    header h1 { font-size: 1.2rem; color: var(--accent); }
-    .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+    header h1 { font-size: 1.15rem; color: var(--accent); }
+    .badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .badge { font-size: 0.75rem; padding: 4px 10px; border-radius: 999px; background: #1e293b; color: var(--muted); border: 1px solid var(--border); }
     .badge span { color: var(--green); font-weight: 600; }
+    .api-key-box {
+      display: flex; gap: 6px; align-items: center; background: #1e293b; padding: 4px 10px;
+      border-radius: 8px; border: 1px solid #334155;
+    }
+    .api-key-box input {
+      background: transparent; border: none; color: var(--text); font-size: 0.8rem; width: 190px; outline: none;
+    }
     main {
-      display: grid; grid-template-columns: 340px 1fr; gap: 20px;
+      display: grid; grid-template-columns: 350px 1fr; gap: 20px;
       padding: 24px 28px; flex: 1; max-width: 1400px; width: 100%; margin: 0 auto;
     }
     @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
@@ -36,10 +43,11 @@
     }
     .card h2 { font-size: 1rem; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 10px; }
     .upload-box {
-      border: 2px dashed #334155; border-radius: 10px; padding: 20px; text-align: center;
-      cursor: pointer; transition: border-color 0.2s;
+      border: 2px dashed #334155; border-radius: 10px; padding: 18px; text-align: center;
+      cursor: pointer; transition: border-color 0.2s; font-size: 0.9rem;
     }
     .upload-box:hover { border-color: var(--accent); }
+    .hint { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
     input[type="file"] { display: none; }
     button {
       background: var(--accent); color: #0b1120; font-weight: 700; border: none;
@@ -75,20 +83,24 @@
     <div class="badges">
       <div class="badge">Chunk: <span>512 / 115</span></div>
       <div class="badge">Top-K: <span>4</span></div>
-      <div class="badge">Vector DB: <span>Qdrant StatefulSet</span></div>
-      <div class="badge">LLM: <span>vLLM + S3</span></div>
-      <div class="badge">DB: <span>AWS RDS</span></div>
+      <div class="badge">Max File: <span>10 MB</span></div>
+      <div class="badge">S3 + Qdrant + RDS + vLLM</div>
+      <div class="api-key-box">
+        <span style="font-size:0.75rem;color:#38bdf8;">API Key:</span>
+        <input type="password" id="apiKeyInput" placeholder="Enter API Key..." onchange="saveKey()" />
+      </div>
     </div>
   </header>
 
   <main>
     <section class="card">
-      <h2>1. Upload Documents (.pdf, .txt, .md)</h2>
+      <h2>1. Upload Documents (Max 10 MB)</h2>
       <label class="upload-box" for="fileInput">
-        <div id="fileLabel">Click to choose a file</div>
+        <div id="fileLabel">Click to choose .pdf, .txt, or .md</div>
+        <div class="hint">Stored in S3 (uploads/) &amp; indexed in Qdrant</div>
         <input type="file" id="fileInput" accept=".pdf,.txt,.md" />
       </label>
-      <button id="uploadBtn" onclick="uploadFile()">Upload &amp; Index to Qdrant</button>
+      <button id="uploadBtn" onclick="uploadFile()">Upload &amp; Index</button>
       <div id="uploadStatus" class="status"></div>
 
       <h2>Indexed Documents (RDS)</h2>
@@ -100,7 +112,7 @@
       <div id="chatLog" class="chat-log">
         <div class="msg">
           <div class="msg-role">Assistant</div>
-          Upload a document on the left, then ask any question here. I will retrieve the top 4 chunks from Qdrant and generate an answer using vLLM on EKS.
+          Enter your API Key at the top right, upload a document (up to 10 MB), then ask any question.
         </div>
       </div>
       <form class="ask-form" onsubmit="askQuestion(event)">
@@ -111,14 +123,25 @@
   </main>
 
   <script>
+    const apiKeyInput = document.getElementById('apiKeyInput');
+    apiKeyInput.value = localStorage.getItem('rag_api_key') || '';
+    function saveKey() {
+      localStorage.setItem('rag_api_key', apiKeyInput.value.trim());
+      loadHistory();
+    }
+    function authHeaders() {
+      const k = apiKeyInput.value.trim();
+      return k ? { 'X-API-Key': k } : {};
+    }
+
     const fileInput = document.getElementById('fileInput');
     fileInput.addEventListener('change', () => {
-      document.getElementById('fileLabel').textContent = fileInput.files[0]?.name || 'Click to choose a file';
+      document.getElementById('fileLabel').textContent = fileInput.files[0]?.name || 'Click to choose .pdf, .txt, or .md';
     });
 
     async function loadHistory() {
       try {
-        const res = await fetch('/api/history');
+        const res = await fetch('/api/history', { headers: authHeaders() });
         if (!res.ok) return;
         const data = await res.json();
         const docList = document.getElementById('docList');
@@ -137,18 +160,23 @@
       const status = document.getElementById('uploadStatus');
       const btn = document.getElementById('uploadBtn');
       if (!file) { status.className = 'status error'; status.textContent = 'Select a file first.'; return; }
+      if (file.size > 10 * 1024 * 1024) {
+        status.className = 'status error';
+        status.textContent = 'File exceeds 10 MB limit!';
+        return;
+      }
 
       btn.disabled = true;
       status.className = 'status';
-      status.textContent = 'Chunking & embedding into Qdrant...';
+      status.textContent = 'Uploading to S3 & indexing into Qdrant...';
 
       const form = new FormData();
       form.append('file', file);
       try {
-        const res = await fetch('/api/upload', { method: 'POST', body: form });
+        const res = await fetch('/api/upload', { method: 'POST', headers: authHeaders(), body: form });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Upload failed');
-        status.textContent = `Indexed "${data.filename}" (${data.chunks_created} chunks)!`;
+        status.textContent = `Saved to S3 & indexed "${data.filename}" (${data.chunks_created} chunks)!`;
         loadHistory();
       } catch (err) {
         status.className = 'status error';
@@ -174,7 +202,7 @@
       try {
         const res = await fetch('/api/ask', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({ question: q, top_k: 4 })
         });
         const data = await res.json();
