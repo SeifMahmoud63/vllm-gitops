@@ -1,0 +1,39 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-hpa
+spec:
+  # 1. بنحدد مين الـ Deployment اللي الـ HPA هيراقبه ويتحكم في عدد نسخه
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-cpu-deployment
+
+  # 2. حدود التوسع (أقل وأقصى عدد مسموح به من الـ Pods)
+  minReplicas: 1
+  maxReplicas: 3
+
+  # 3. شروط ومقاييس التوسع التلقائي
+  metrics:
+  # الشرط الأول: مراقبة الـ CPU (لو المتوسط عدى 60% من الـ Request المحجوز، زوّد Pods)
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+
+  # 4. سلوك التهدئة والأمان (Scaling Behavior) لمنع التذبذب السريع
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # ينتظر 5 دقائق هدوء قبل تقليل عدد الـ Pods
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleUp:
+      stabilizationWindowSeconds: 0   # يزود فوراً في ثواني بدون انتظار عند حدوث ضغط
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15

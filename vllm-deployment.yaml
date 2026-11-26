@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: vllm-openai
+  name: vllm-cpu-deployment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm-openai
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: vllm-openai
+    spec:
+      containers:
+      - args:
+        - --model
+        - Qwen/Qwen2.5-0.5B-Instruct
+        - --port
+        - '8000'
+        - --host
+        - 0.0.0.0
+        - --max-model-len
+        - '2048'
+        - --enforce-eager
+        - --api-key
+        - my-super-secret-rag-key-2026
+        command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+        env:
+        - name: HF_HOME
+          value: /tmp/huggingface
+        - name: VLLM_CPU_KVCACHE_SPACE
+          value: '1'
+        image: vllm/vllm-openai-cpu:latest-x86_64
+        imagePullPolicy: IfNotPresent
+        name: vllm
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          limits:
+            memory: 6Gi
+          requests:
+            cpu: 1000m
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          failureThreshold: 3
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+        name: dshm
