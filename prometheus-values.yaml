@@ -1,0 +1,23 @@
+# Lightweight values for kube-prometheus-stack on EKS
+grafana:
+  adminPassword: "admin"
+  service:
+    type: ClusterIP
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 1Gi
+    storageSpec:
+      emptyDir: {}
+
+alertmanager:
+  enabled: false
+
+nodeExporter:
+  enabled: true

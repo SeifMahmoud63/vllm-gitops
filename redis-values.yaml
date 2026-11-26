@@ -1,0 +1,25 @@
+# redis-values.yaml
+# دي لوحة التحكم الخاصة بـ Redis فقط في الـ Cluster
+
+# 1. المعمارية (سيرفر واحد standalone ولا ماستر وسليفز replication)
+architecture: standalone
+
+# 2. الأمان والباسورد
+auth:
+  enabled: false          # لو عايز باسورد خليه true واكتب الباسورد تحت
+  # password: "my-secret-password"
+
+# 3. إعدادات السيرفر الرئيسي (Master)
+master:
+  # مساحة الرامات والـ CPU المخصصة لـ Redis
+  resources:
+    requests:
+      cpu: "100m"         # عُشر نواة CPU كحد أدنى
+      memory: "128Mi"     # 128 ميجابايت رامات كافية جداً للكاش
+    limits:
+      cpu: "250m"         # ربع نواة كحد أقصى
+      memory: "256Mi"     # 256 ميجابايت كحد أقصى
+
+  # التخزين على الهارد ديسك (Persistence)
+  persistence:
+    enabled: false        # لو مش محتاج تحفظ الداتا على هارد (In-memory cache سريع جداً للـ RAG والـ Celery)
